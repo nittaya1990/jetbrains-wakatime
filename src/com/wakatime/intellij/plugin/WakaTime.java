@@ -9,11 +9,14 @@ Website:     https://wakatime.com/
 package com.wakatime.intellij.plugin;
 
 import com.intellij.AppTopics;
+import com.intellij.compiler.server.BuildManagerListener;
 import com.intellij.ide.BrowserUtil;
 import com.intellij.ide.plugins.PluginManager;
 import com.intellij.ide.plugins.PluginManagerCore;
+import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationInfo;
 import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.compiler.CompilerTopics;
 import com.intellij.openapi.components.ApplicationComponent;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.editor.Document;
@@ -21,33 +24,28 @@ import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.editor.EditorFactory;
 import com.intellij.openapi.extensions.PluginId;
 import com.intellij.openapi.fileEditor.FileDocumentManager;
+import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.fileTypes.FileType;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.ui.Messages;
+import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.StatusBar;
 import com.intellij.openapi.wm.WindowManager;
 import com.intellij.util.PlatformUtils;
-import com.intellij.util.messages.MessageBus;
+import com.intellij.util.concurrency.AppExecutorUtil;
 import com.intellij.util.messages.MessageBusConnection;
+import org.apache.log4j.Level;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.awt.KeyboardFocusManager;
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
-import java.io.InputStreamReader;
-import java.io.IOException;
-import java.io.OutputStreamWriter;
+import java.io.*;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-
-import org.apache.log4j.Level;
+import java.util.concurrent.*;
 
 public class WakaTime implements ApplicationComponent {
 
@@ -64,6 +62,7 @@ public class WakaTime implements ApplicationComponent {
     public static Boolean READY = false;
     public static String lastFile = null;
     public static BigDecimal lastTime = new BigDecimal(0);
+    public static Boolean isBuilding = false;
 
     private final int queueTimeoutSeconds = 30;
     private static ConcurrentLinkedQueue<Heartbeat> heartbeatsQueue = new ConcurrentLinkedQueue<Heartbeat>();
@@ -91,7 +90,6 @@ public class WakaTime implements ApplicationComponent {
         setupDebugging();
         setupStatusBar();
         setLoggingLevel();
-        Dependencies.configureProxy();
         checkApiKey();
         checkCli();
         setupEventListeners();
@@ -107,32 +105,43 @@ public class WakaTime implements ApplicationComponent {
                     WakaTime.READY = true;
                     log.info("Finished downloading and installing wakatime-cli.");
                 } else if (Dependencies.isCLIOld()) {
-                    log.info("Upgrading wakatime-cli ...");
-                    Dependencies.installCLI();
-                    WakaTime.READY = true;
-                    log.info("Finished upgrading wakatime-cli.");
+                    if (System.getenv("WAKATIME_CLI_LOCATION") != null && !System.getenv("WAKATIME_CLI_LOCATION").trim().isEmpty()) {
+                        File wakatimeCLI = new File(System.getenv("WAKATIME_CLI_LOCATION"));
+                        if (wakatimeCLI.exists()) {
+                          log.warn("$WAKATIME_CLI_LOCATION is out of date, please update it.");
+                        }
+                    } else {
+                        log.info("Upgrading wakatime-cli ...");
+                        Dependencies.installCLI();
+                        WakaTime.READY = true;
+                        log.info("Finished upgrading wakatime-cli.");
+                    }
                 } else {
                     WakaTime.READY = true;
                     log.info("wakatime-cli is up to date.");
                 }
+                Dependencies.createSymlink(Dependencies.combinePaths(Dependencies.getResourcesLocation(), "wakatime-cli"), Dependencies.getCLILocation());
                 log.debug("wakatime-cli location: " + Dependencies.getCLILocation());
             }
         });
     }
 
-    private void checkApiKey() {
+    private static void checkApiKey() {
         ApplicationManager.getApplication().invokeLater(new Runnable(){
             public void run() {
                 // prompt for apiKey if it does not already exist
-                Project project = null;
-                try {
-                    project = ProjectManager.getInstance().getDefaultProject();
-                } catch (Exception e) { }
-                ApiKey apiKey = new ApiKey(project);
-                if (apiKey.getApiKey().equals("")) {
-                    apiKey.promptForApiKey();
+                Project project = getCurrentProject();
+                if (project == null) return;
+                if (ConfigFile.getApiKey().equals("")) {
+                    try {
+                        ApiKey apiKey = new ApiKey(project);
+                        apiKey.promptForApiKey();
+                    } catch(Exception e) {
+                        log.warn(e);
+                    } catch (Throwable throwable) {
+                        log.warn("Unable to prompt for api key because UI not ready.");
+                    }
                 }
-                log.debug("Api Key: " + obfuscateKey(ApiKey.getApiKey()));
             }
         });
     }
@@ -140,20 +149,24 @@ public class WakaTime implements ApplicationComponent {
     private void setupEventListeners() {
         ApplicationManager.getApplication().invokeLater(new Runnable(){
             public void run() {
+                Disposable disposable = Disposer.newDisposable((String) "WakaTimeListener");
+                MessageBusConnection connection = ApplicationManager.getApplication().getMessageBus().connect();
 
                 // save file
-                MessageBus bus = ApplicationManager.getApplication().getMessageBus();
-                connection = bus.connect();
                 connection.subscribe(AppTopics.FILE_DOCUMENT_SYNC, new CustomSaveListener());
 
                 // edit document
-                EditorFactory.getInstance().getEventMulticaster().addDocumentListener(new CustomDocumentListener());
+                EditorFactory.getInstance().getEventMulticaster().addDocumentListener(new CustomDocumentListener(), disposable);
 
                 // mouse press
-                EditorFactory.getInstance().getEventMulticaster().addEditorMouseListener(new CustomEditorMouseListener());
+                EditorFactory.getInstance().getEventMulticaster().addEditorMouseListener(new CustomEditorMouseListener(), disposable);
 
                 // scroll document
-                EditorFactory.getInstance().getEventMulticaster().addVisibleAreaListener(new CustomVisibleAreaListener());
+                EditorFactory.getInstance().getEventMulticaster().addVisibleAreaListener(new CustomVisibleAreaListener(), disposable);
+
+                // compiling
+                connection.subscribe(BuildManagerListener.TOPIC, new CustomBuildManagerListener());
+                connection.subscribe(CompilerTopics.COMPILATION_STATUS, new CustomBuildManagerListener());
             }
         });
     }
@@ -172,9 +185,11 @@ public class WakaTime implements ApplicationComponent {
         if (DEBUG_CHECKED) return;
         DEBUG_CHECKED = true;
         if (!DEBUG) return;
-        try {
-            Messages.showWarningDialog("Your IDE may respond slower. Disable debug mode from Tools -> WakaTime Settings.", "WakaTime Debug Mode Enabled");
-        } catch (Exception e) { }
+        ApplicationManager.getApplication().invokeLater(new Runnable(){
+            public void run() {
+                Messages.showWarningDialog("Your IDE may respond slower. Disable debug mode from Tools -> WakaTime Settings.", "WakaTime Debug Mode Enabled");
+            }
+        });
     }
 
     public void disposeComponent() {
@@ -202,15 +217,14 @@ public class WakaTime implements ApplicationComponent {
                 if (statusbar != null) statusbar.updateWidget("WakaTime");
             }
         }
-        if (!shouldLogFile(file))
-            return;
-        final String projectName = project != null ? project.getName() : null;
+        if (!shouldLogFile(file)) return;
         final BigDecimal time = WakaTime.getCurrentTimestamp();
         if (!isWrite && file.getPath().equals(WakaTime.lastFile) && !enoughTimePassed(time)) {
             return;
         }
         WakaTime.lastFile = file.getPath();
         WakaTime.lastTime = time;
+        final String projectName = project != null ? project.getName() : null;
         final String language = WakaTime.getLanguage(file);
         ApplicationManager.getApplication().executeOnPooledThread(new Runnable() {
             public void run() {
@@ -220,13 +234,33 @@ public class WakaTime implements ApplicationComponent {
                 h.isWrite = isWrite;
                 h.project = projectName;
                 h.language = language;
+                h.isBuilding = WakaTime.isBuilding;
                 heartbeatsQueue.add(h);
+
+                if (WakaTime.isBuilding) setBuildTimeout();
             }
         });
     }
 
+    private static void setBuildTimeout() {
+        AppExecutorUtil.getAppScheduledExecutorService().schedule(new Runnable() {
+            @Override
+            public void run() {
+                if (!WakaTime.isBuilding) return;
+                Project project = getCurrentProject();
+                if (project == null) return;
+                if (!WakaTime.isProjectInitialized(project)) return;
+                VirtualFile file = WakaTime.getCurrentFile(project);
+                if (file == null) return;
+                WakaTime.appendHeartbeat(file, project, false);
+            }
+        }, 10, TimeUnit.SECONDS);
+    }
+
     private static void processHeartbeatQueue() {
         if (!WakaTime.READY) return;
+
+        checkApiKey();
 
         // get single heartbeat from queue
         Heartbeat heartbeat = heartbeatsQueue.poll();
@@ -282,6 +316,11 @@ public class WakaTime implements ApplicationComponent {
             }
         } catch (Exception e) {
             log.warn(e);
+            if (Dependencies.isWindows() && e.toString().contains("Access is denied")) {
+                try {
+                    Messages.showWarningDialog("Microsoft Defender is blocking WakaTime. Please allow " + Dependencies.getCLILocation() + " to run so WakaTime can upload code stats to your dashboard.", "Error");
+                } catch (Exception ex) { }
+            }
         }
     }
 
@@ -297,6 +336,9 @@ public class WakaTime implements ApplicationComponent {
             h.append(heartbeat.timestamp.toPlainString());
             h.append(",\"is_write\":");
             h.append(heartbeat.isWrite.toString());
+            if (heartbeat.isBuilding) {
+                h.append(",\"category\":\"building\"");
+            }
             if (heartbeat.project != null) {
                 h.append(",\"project\":\"");
                 h.append(jsonEscape(heartbeat.project));
@@ -356,10 +398,13 @@ public class WakaTime implements ApplicationComponent {
         cmds.add(heartbeat.entity);
         cmds.add("--time");
         cmds.add(heartbeat.timestamp.toPlainString());
-        cmds.add("--key");
-        cmds.add(ApiKey.getApiKey());
+        String apiKey = ConfigFile.getApiKey();
+        if (!apiKey.equals("")) {
+            cmds.add("--key");
+            cmds.add(apiKey);
+        }
         if (heartbeat.project != null) {
-            cmds.add("--project");
+            cmds.add("--alternate-project");
             cmds.add(heartbeat.project);
         }
         if (heartbeat.language != null) {
@@ -370,25 +415,15 @@ public class WakaTime implements ApplicationComponent {
         cmds.add(IDE_NAME+"/"+IDE_VERSION+" "+IDE_NAME+"-wakatime/"+VERSION);
         if (heartbeat.isWrite)
             cmds.add("--write");
+        if (heartbeat.isBuilding) {
+            cmds.add("--category");
+            cmds.add("building");
+        }
         if (extraHeartbeats.size() > 0)
             cmds.add("--extra-heartbeats");
         return cmds.toArray(new String[cmds.size()]);
     }
 
-    private static String getLanguage(final VirtualFile file) {
-        FileType type = file.getFileType();
-        if (type != null)
-            return type.getName();
-        return null;
-    }
-
-    public static VirtualFile getFile(Document document) {
-        if (document == null) return null;
-        FileDocumentManager instance = FileDocumentManager.getInstance();
-        if (instance == null) return null;
-        VirtualFile file = instance.getFile(document);
-        return file;
-    }
 
     public static boolean enoughTimePassed(BigDecimal currentTime) {
         return WakaTime.lastTime.add(FREQUENCY).compareTo(currentTime) < 0;
@@ -415,19 +450,21 @@ public class WakaTime implements ApplicationComponent {
     }
 
     public static void setupDebugging() {
-        String debug = ConfigFile.get("settings", "debug");
+        String debug = ConfigFile.get("settings", "debug", false);
         WakaTime.DEBUG = debug != null && debug.trim().equals("true");
     }
 
     public static void setupStatusBar() {
-        String statusBarVal = ConfigFile.get("settings", "status_bar_enabled");
+        String statusBarVal = ConfigFile.get("settings", "status_bar_enabled", false);
         WakaTime.STATUS_BAR = statusBarVal == null || !statusBarVal.trim().equals("false");
         if (WakaTime.READY) {
             try {
                 updateStatusBarText();
-                Project project = ProjectManager.getInstance().getDefaultProject();
+                Project project = getCurrentProject();
+                if (project == null) return;
                 StatusBar statusbar = WindowManager.getInstance().getStatusBar(project);
-                if (statusbar != null) statusbar.updateWidget("WakaTime");
+                if (statusbar == null) return;
+                statusbar.updateWidget("WakaTime");
             } catch (Exception e) {
                 log.warn(e);
             }
@@ -449,6 +486,40 @@ public class WakaTime implements ApplicationComponent {
             return editors[0].getProject();
         }
         return null;
+    }
+
+    private static String getLanguage(final VirtualFile file) {
+        FileType type = file.getFileType();
+        if (type != null)
+            return type.getName();
+        return null;
+    }
+
+    @Nullable
+    public static VirtualFile getFile(Document document) {
+        if (document == null) return null;
+        FileDocumentManager instance = FileDocumentManager.getInstance();
+        if (instance == null) return null;
+        VirtualFile file = instance.getFile(document);
+        return file;
+    }
+
+    @Nullable
+    public static Project getCurrentProject() {
+        Project project = null;
+        try {
+            project = ProjectManager.getInstance().getDefaultProject();
+        } catch (Exception e) { }
+        return project;
+    }
+
+    @Nullable
+    public static VirtualFile getCurrentFile(Project project) {
+        if (project == null) return null;
+        Editor editor = FileEditorManager.getInstance(project).getSelectedTextEditor();
+        if (editor == null) return null;
+        Document document = editor.getDocument();
+        return WakaTime.getFile(document);
     }
 
     public static void openDashboardWebsite() {
@@ -473,7 +544,7 @@ public class WakaTime implements ApplicationComponent {
 
         ApplicationManager.getApplication().executeOnPooledThread(new Runnable() {
             public void run() {
-                final String[] cmds = new String[]{Dependencies.getCLILocation(), "--today", "--key", ApiKey.getApiKey()};
+                final String[] cmds = new String[]{Dependencies.getCLILocation(), "--today", "--key", ConfigFile.getApiKey()};
                 log.debug("Executing CLI: " + Arrays.toString(obfuscateKey(cmds)));
 
                 try {
@@ -498,6 +569,11 @@ public class WakaTime implements ApplicationComponent {
                     interruptedException.printStackTrace();
                 } catch (Exception e) {
                     log.warn(e);
+                    if (Dependencies.isWindows() && e.toString().contains("Access is denied")) {
+                        try {
+                            Messages.showWarningDialog("Microsoft Defender is blocking WakaTime. Please allow " + Dependencies.getCLILocation() + " to run so WakaTime can upload code stats to your dashboard.", "Error");
+                        } catch (Exception ex) { }
+                    }
                 }
             }
         });

@@ -1,7 +1,7 @@
 <idea-plugin version="2" url="https://wakatime.com">
     <id>com.wakatime.intellij.plugin</id>
     <name>WakaTime</name>
-    <version>13.1.0</version>
+    <version>14.0.0</version>
     <vendor email="support@wakatime.com" url="https://wakatime.com">WakaTime</vendor>
 
     <description><![CDATA[
@@ -27,6 +27,97 @@
     ]]></description>
 
     <change-notes><![CDATA[
+14.0.0 (2022-03-30)<br />
+++++++++++++++++++<br />
+<br />
+- Track time spent building. #116<br />
+<br />
+<br />
+13.1.14 (2022-03-06)<br />
+++++++++++++++++++<br />
+<br />
+- Show error message when Defender blocks WakaTime from running. #203<br />
+<br />
+<br />
+13.1.13 (2022-02-18)<br />
+++++++++++++++++++<br />
+<br />
+- Prompt for api key after UI ready. #200<br />
+<br />
+<br />
+13.1.12 (2022-02-18)<br />
+++++++++++++++++++<br />
+<br />
+- Prevent exception from malformed proxy string.<br />
+<br />
+<br />
+13.1.11 (2022-02-09)<br />
+++++++++++++++++++<br />
+<br />
+- Prevent exception when api key dialog opens before UI ready. #200<br />
+<br />
+<br />
+13.1.10 (2022-01-27)<br />
+++++++++++++++++++<br />
+<br />
+- Delete old wakatime-cli directory before creating symlink.<br />
+<br />
+<br />
+13.1.9 (2022-01-27)<br />
+++++++++++++++++++<br />
+<br />
+- Create symlink to wakatime-cli for other editor plugins.<br />
+<br />
+<br />
+13.1.8 (2021-12-18)<br />
+++++++++++++++++++<br />
+<br />
+- Remove null chars when reading and writing config file. #195<br />
+<br />
+<br />
+13.1.7 (2021-12-18)<br />
+++++++++++++++++++<br />
+<br />
+- Log dependency download url in debug mode. #195<br />
+<br />
+<br />
+13.1.6 (2021-12-18)<br />
+++++++++++++++++++<br />
+<br />
+- Prevent trying to use empty proxy. #195<br />
+<br />
+<br />
+13.1.5 (2021-12-17)<br />
+++++++++++++++++++<br />
+<br />
+- Log malformed url to idea.log file. #195<br />
+<br />
+<br />
+13.1.4 (2021-12-03)<br />
+++++++++++++++++++<br />
+<br />
+- Prevent exception from AWT events are not allowed inside write action. #191<br />
+<br />
+<br />
+13.1.3 (2021-11-02)<br />
+++++++++++++++++++<br />
+<br />
+- Report missing wakatime-cli platform support to API.<br />
+<br />
+<br />
+13.1.2 (2021-11-01)<br />
+++++++++++++++++++<br />
+<br />
+- Use separate file for internal configs.<br />
+- Use last modified instead of etag for GitHub Releases API caching.<br />
+<br />
+<br />
+13.1.1 (2021-10-24)<br />
+++++++++++++++++++<br />
+<br />
+- Fix 2021.3 EAP exception on startup. #186<br />
+<br />
+<br />
 13.1.0 (2021-09-07)<br />
 ++++++++++++++++++<br />
 <br />
@@ -752,6 +843,7 @@
          on how to target different products -->
     <depends>com.intellij.modules.lang</depends>
     <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.java</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <!-- Add your extensions here -->

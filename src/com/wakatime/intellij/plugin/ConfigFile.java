@@ -18,26 +18,28 @@ import java.io.UnsupportedEncodingException;
 
 public class ConfigFile {
     private static final String fileName = ".wakatime.cfg";
+    private static final String internalFileName = ".wakatime-internal.cfg";
     private static String cachedConfigFile = null;
+    private static String _api_key = "";
 
-    private static String getConfigFilePath() {
+    private static String getConfigFilePath(boolean internal) {
         if (ConfigFile.cachedConfigFile == null) {
             if (System.getenv("WAKATIME_HOME") != null && !System.getenv("WAKATIME_HOME").trim().isEmpty()) {
                 File folder = new File(System.getenv("WAKATIME_HOME"));
                 if (folder.exists()) {
-                    ConfigFile.cachedConfigFile = new File(folder, ConfigFile.fileName).getAbsolutePath();
+                    ConfigFile.cachedConfigFile = folder.getAbsolutePath();
                     WakaTime.log.debug("Using $WAKATIME_HOME for config folder: " + ConfigFile.cachedConfigFile);
-                    return ConfigFile.cachedConfigFile;
+                    return new File(ConfigFile.cachedConfigFile, internal ? internalFileName : fileName).getAbsolutePath();
                 }
             }
-            ConfigFile.cachedConfigFile = new File(System.getProperty("user.home"), ConfigFile.fileName).getAbsolutePath();
+            ConfigFile.cachedConfigFile = new File(System.getProperty("user.home")).getAbsolutePath();
             WakaTime.log.debug("Using $HOME for config folder: " + ConfigFile.cachedConfigFile);
         }
-        return ConfigFile.cachedConfigFile;
+        return new File(ConfigFile.cachedConfigFile, internal ? internalFileName : fileName).getAbsolutePath();
     }
 
-    public static String get(String section, String key) {
-        String file = ConfigFile.getConfigFilePath();
+    public static String get(String section, String key, boolean internal) {
+        String file = ConfigFile.getConfigFilePath(internal);
         String val = null;
         try {
             BufferedReader br = new BufferedReader(new FileReader(file));
@@ -53,7 +55,7 @@ public class ConfigFile {
                             if (parts.length == 2 && parts[0].trim().equals(key)) {
                                 val = parts[1].trim();
                                 br.close();
-                                return val;
+                                return removeNulls(val);
                             }
                         }
                     }
@@ -69,11 +71,14 @@ public class ConfigFile {
                 }
             }
         } catch (FileNotFoundException e1) { /* ignored */ }
-        return val;
+        return removeNulls(val);
     }
 
-    public static void set(String section, String key, String val) {
-        String file = ConfigFile.getConfigFilePath();
+    public static void set(String section, String key, boolean internal, String val) {
+        key = removeNulls(key);
+        val = removeNulls(val);
+
+        String file = ConfigFile.getConfigFilePath(internal);
         StringBuilder contents = new StringBuilder();
         try {
             BufferedReader br = new BufferedReader(new FileReader(file));
@@ -82,6 +87,7 @@ public class ConfigFile {
                 String line = br.readLine();
                 Boolean found = false;
                 while (line != null) {
+                    line = removeNulls(line);
                     if (line.trim().startsWith("[") && line.trim().endsWith("]")) {
                         if (section.toLowerCase().equals(currentSection) && !found) {
                             contents.append(key + " = " + val + "\n");
@@ -142,6 +148,28 @@ public class ConfigFile {
             writer.print(contents.toString());
             writer.close();
         }
+    }
+
+    public static String getApiKey() {
+        if (!ConfigFile._api_key.equals("")) {
+            return ConfigFile._api_key;
+        }
+
+        String apiKey = get("settings", "api_key", false);
+        if (apiKey == null) apiKey = "";
+
+        ConfigFile._api_key = apiKey;
+        return apiKey;
+    }
+
+    public static void setApiKey(String apiKey) {
+        set("settings", "api_key", false, apiKey);
+        ConfigFile._api_key = apiKey;
+    }
+
+    private static String removeNulls(String s) {
+        if (s == null) return null;
+        return s.replace("\0", "");
     }
 
 }
